@@ -44,4 +44,4 @@ loader.load(
 ```
 
 ## Exemplu
-![hl_c01_a1](Tema/images/hl_c01_a1.png)
+![hl_c01_a1](/images/hl_c01_a1.png)
