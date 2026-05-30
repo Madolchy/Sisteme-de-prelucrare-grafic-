@@ -1,0 +1,3 @@
+[submodule "hlbsp-converter"]
+	path = hlbsp-converter
+	url = https://github.com/lewa-j/hlbsp-converter.git

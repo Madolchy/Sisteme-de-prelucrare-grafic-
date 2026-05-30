@@ -1,0 +1,379 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>GLTF Viewer</title>
+        <style>
+            * {
+                margin: 0;
+                padding: 0;
+                box-sizing: border-box;
+            }
+            body {
+                overflow: hidden;
+                background: #1a1a2e;
+                font-family: "Segoe UI", system-ui, sans-serif;
+            }
+            canvas {
+                display: block;
+            }
+
+            #loading {
+                position: fixed;
+                top: 50%;
+                left: 50%;
+                transform: translate(-50%, -50%);
+                color: #ccc;
+                font-size: 18px;
+                pointer-events: none;
+                z-index: 10;
+                text-align: center;
+            }
+            .spinner {
+                width: 40px;
+                height: 40px;
+                margin: 0 auto 12px;
+                border: 3px solid rgba(255, 255, 255, 0.2);
+                border-top-color: #fff;
+                border-radius: 50%;
+                animation: spin 0.8s linear infinite;
+            }
+            @keyframes spin {
+                to {
+                    transform: rotate(360deg);
+                }
+            }
+
+            #info {
+                position: fixed;
+                bottom: 16px;
+                left: 50%;
+                transform: translateX(-50%);
+                color: #aaa;
+                font-size: 12px;
+                pointer-events: none;
+                z-index: 10;
+                background: rgba(0, 0, 0, 0.55);
+                padding: 8px 18px;
+                border-radius: 20px;
+                text-align: center;
+                line-height: 1.5;
+            }
+            #info span {
+                color: #fff;
+                font-weight: 600;
+            }
+        </style>
+    </head>
+    <body>
+        <div id="loading">
+            <div class="spinner"></div>
+            <div>Loading model...</div>
+        </div>
+
+        <div id="info">
+            <span>LMB</span> Look &nbsp;|&nbsp; <span>RMB</span> Pan
+            &nbsp;|&nbsp; <span>Scroll</span> Dolly &nbsp;|&nbsp;
+            <span>WASD</span> Fly &nbsp;|&nbsp; <span>QE</span> Up/Down
+            &nbsp;|&nbsp; <span>Shift</span> Boost
+        </div>
+
+        <script type="importmap">
+            {
+                "imports": {
+                    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+                }
+            }
+        </script>
+
+        <script type="module">
+            import * as THREE from "three";
+            import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+
+            // --- Scene setup ---
+            const renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.shadowMap.enabled = true;
+            renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+            renderer.toneMapping = THREE.ACESFilmicToneMapping;
+            renderer.toneMappingExposure = 1.0;
+            document.body.appendChild(renderer.domElement);
+
+            const scene = new THREE.Scene();
+            scene.background = new THREE.Color("#1a1a2e");
+            scene.fog = new THREE.Fog("#1a1a2e", 30, 400);
+
+            const camera = new THREE.PerspectiveCamera(
+                55,
+                window.innerWidth / window.innerHeight,
+                0.5,
+                3000,
+            );
+            camera.position.set(30, 25, 50);
+
+            // Store initial look direction as Euler angles
+            const initialDir = new THREE.Vector3();
+            camera.getWorldDirection(initialDir);
+            const euler = new THREE.Euler().setFromQuaternion(
+                camera.quaternion,
+                "YXZ",
+            );
+            let yaw = euler.y;
+            let pitch = euler.x;
+
+            // --- Lighting ---
+            scene.add(new THREE.AmbientLight("#8899bb", 0.7));
+
+            const keyLight = new THREE.DirectionalLight("#ffffff", 5);
+            keyLight.position.set(50, 80, 30);
+            keyLight.castShadow = true;
+            keyLight.shadow.mapSize.set(2048, 2048);
+            keyLight.shadow.camera.near = 1;
+            keyLight.shadow.camera.far = 500;
+            keyLight.shadow.camera.left = -200;
+            keyLight.shadow.camera.right = 200;
+            keyLight.shadow.camera.top = 200;
+            keyLight.shadow.camera.bottom = -200;
+            keyLight.shadow.bias = -0.0001;
+            scene.add(keyLight);
+
+            const fillLight = new THREE.DirectionalLight("#aaccff", 2);
+            fillLight.position.set(-30, 20, -30);
+            scene.add(fillLight);
+
+            const rimLight = new THREE.DirectionalLight("#ffccaa", 1.2);
+            rimLight.position.set(0, 5, -40);
+            scene.add(rimLight);
+
+            // --- Grid ---
+            const grid = new THREE.GridHelper(200, 40, "#444466", "#222244");
+            scene.add(grid);
+
+            // ==================================================================
+            //  CAMERA CONTROLLER (FPS-style fly cam)
+            //  LMB drag = look around (yaw/pitch in place)
+            //  RMB drag = pan (strafe in camera's XY plane)
+            //  Scroll    = dolly forward/back
+            //  WASD      = fly (horizontal), QE = up/down
+            // ==================================================================
+
+            const keys = {
+                w: false,
+                a: false,
+                s: false,
+                d: false,
+                q: false,
+                e: false,
+                shift: false,
+            };
+            const clock = new THREE.Clock();
+
+            let lmbDown = false;
+            let rmbDown = false;
+            let prevMouse = { x: 0, y: 0 };
+
+            const LOOK_SENSITIVITY = 0.003;
+            const PAN_SPEED = 0.02;
+            const DOLLY_SPEED = 0.7;
+
+            renderer.domElement.addEventListener("mousedown", (e) => {
+                if (e.button === 0) {
+                    lmbDown = true;
+                    prevMouse.x = e.clientX;
+                    prevMouse.y = e.clientY;
+                }
+                if (e.button === 2) {
+                    rmbDown = true;
+                    prevMouse.x = e.clientX;
+                    prevMouse.y = e.clientY;
+                }
+            });
+            window.addEventListener("mouseup", (e) => {
+                if (e.button === 0) lmbDown = false;
+                if (e.button === 2) rmbDown = false;
+            });
+            window.addEventListener("mousemove", (e) => {
+                const dx = e.clientX - prevMouse.x;
+                const dy = e.clientY - prevMouse.y;
+                prevMouse.x = e.clientX;
+                prevMouse.y = e.clientY;
+
+                if (lmbDown) {
+                    yaw -= dx * LOOK_SENSITIVITY;
+                    pitch -= dy * LOOK_SENSITIVITY;
+                    pitch = Math.max(
+                        -Math.PI * 0.49,
+                        Math.min(Math.PI * 0.49, pitch),
+                    );
+                    camera.quaternion.setFromEuler(
+                        new THREE.Euler(pitch, yaw, 0, "YXZ"),
+                    );
+                }
+
+                if (rmbDown) {
+                    const right = new THREE.Vector3().setFromMatrixColumn(
+                        camera.matrix,
+                        0,
+                    );
+                    const up = new THREE.Vector3().setFromMatrixColumn(
+                        camera.matrix,
+                        1,
+                    );
+                    camera.position.addScaledVector(right, -dx * PAN_SPEED);
+                    camera.position.addScaledVector(up, dy * PAN_SPEED);
+                }
+            });
+            window.addEventListener("wheel", (e) => {
+                const dir = new THREE.Vector3();
+                camera.getWorldDirection(dir);
+                camera.position.addScaledVector(
+                    dir,
+                    -Math.sign(e.deltaY) * DOLLY_SPEED,
+                );
+            });
+            window.addEventListener("contextmenu", (e) => e.preventDefault());
+
+            window.addEventListener("keydown", (e) => {
+                const k = e.key.toLowerCase();
+                if (k in keys) {
+                    keys[k] = true;
+                    e.preventDefault();
+                }
+            });
+            window.addEventListener("keyup", (e) => {
+                const k = e.key.toLowerCase();
+                if (k in keys) {
+                    keys[k] = false;
+                    e.preventDefault();
+                }
+            });
+
+            // --- Load GLTF ---
+            const loader = new GLTFLoader();
+
+            loader.load(
+                "output/hl_c01_a1.gltf",
+                (gltf) => {
+                    const model = gltf.scene;
+
+                    let meshCount = 0;
+                    model.traverse((child) => {
+                        if (child.isMesh) {
+                            meshCount++;
+                            child.castShadow = true;
+                            child.receiveShadow = true;
+
+                            const materials = Array.isArray(child.material)
+                                ? child.material
+                                : [child.material];
+                            materials.forEach((m) => {
+                                if (m.isMaterial) {
+                                    const c = m.color;
+                                    if (c.r === 0 && c.g === 0 && c.b === 0)
+                                        c.set("#778899");
+                                }
+                            });
+                        }
+                    });
+
+                    const box = new THREE.Box3().setFromObject(model);
+                    const center = new THREE.Vector3();
+                    box.getCenter(center);
+                    const size = new THREE.Vector3();
+                    box.getSize(size);
+                    const maxDim = Math.max(size.x, size.y, size.z);
+
+                    model.position.set(-center.x, -box.min.y, -center.z);
+                    scene.add(model);
+
+                    const worldCenter = new THREE.Vector3(
+                        0,
+                        center.y - box.min.y,
+                        0,
+                    );
+                    grid.position.set(0, 0, 0);
+                    grid.scale.setScalar(Math.max(maxDim / 20, 1));
+
+                    // Position camera looking at model center
+                    const dist = maxDim * 0.7;
+                    camera.position.set(dist * 0.5, dist * 0.35, dist * 0.7);
+                    camera.lookAt(worldCenter);
+
+                    // Capture the initial yaw/pitch from lookAt
+                    const e = new THREE.Euler().setFromQuaternion(
+                        camera.quaternion,
+                        "YXZ",
+                    );
+                    yaw = e.y;
+                    pitch = e.x;
+
+                    document.getElementById("loading").style.display = "none";
+                    console.log("Model loaded:", gltf);
+                    console.log(
+                        `  Meshes: ${meshCount}  |  Bounds: ${size.x.toFixed(2)} x ${size.y.toFixed(2)} x ${size.z.toFixed(2)}`,
+                    );
+                },
+                (progress) => {
+                    if (progress.total > 0) {
+                        const pct = Math.round(
+                            (progress.loaded / progress.total) * 100,
+                        );
+                        document.querySelector(
+                            "#loading div:last-child",
+                        ).textContent = `Loading... ${pct}%`;
+                    }
+                },
+                (error) => {
+                    document.querySelector(
+                        "#loading div:last-child",
+                    ).textContent = "Failed to load model.";
+                    document.querySelector("#loading .spinner").style.display =
+                        "none";
+                    console.error("GLTF load error:", error);
+                },
+            );
+
+            // --- Resize ---
+            window.addEventListener("resize", () => {
+                camera.aspect = window.innerWidth / window.innerHeight;
+                camera.updateProjectionMatrix();
+                renderer.setSize(window.innerWidth, window.innerHeight);
+            });
+
+            // --- Render loop ---
+            function animate() {
+                requestAnimationFrame(animate);
+
+                const delta = Math.min(clock.getDelta(), 0.1);
+                const speed = 15 * delta * (keys.shift ? 3.0 : 1.0);
+
+                const forward = new THREE.Vector3();
+                camera.getWorldDirection(forward);
+                const right = new THREE.Vector3()
+                    .crossVectors(forward, camera.up)
+                    .normalize();
+
+                const move = new THREE.Vector3();
+                if (keys.w) move.add(forward);
+                if (keys.s) move.sub(forward);
+                if (keys.d) move.add(right);
+                if (keys.a) move.sub(right);
+
+                if (move.lengthSq() > 0) {
+                    move.normalize().multiplyScalar(speed);
+                    camera.position.add(move);
+                }
+
+                if (keys.e) camera.position.y += speed;
+                if (keys.q) camera.position.y -= speed;
+
+                renderer.render(scene, camera);
+            }
+
+            requestAnimationFrame(animate);
+        </script>
+    </body>
+</html>
